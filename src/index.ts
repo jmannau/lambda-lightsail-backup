@@ -1,6 +1,7 @@
 // Load AWS APIs
-import * as AWS from "aws-sdk";
 import { ScheduledHandler } from "aws-lambda";
+import * as AWS from "aws-sdk";
+import "source-map-support/register";
 
 const region = process.env.AWS_REGION || "ap-southeast-2";
 AWS.config.update({ region });
@@ -50,33 +51,31 @@ exports.handler = (async () => {
     : await getAllInstances();
   await loadBackups(instances);
 
-  const promises = instances.reduce((promises, instance) => {
+  for (let instance of instances) {
     if (!hasBackupToday(instance)) {
-      promises.push(createBackup(instance));
+      await createBackup(instance);
     }
 
-    return promises.concat(pruneBackups(instance));
-  }, []);
-
-  await Promise.all(promises);
+    await pruneBackups(instance);
+  }
 }) as ScheduledHandler;
 
 async function loadBackups(instances: string[]) {
   let page = 1;
   console.log(`Loading all snapshots (page ${page})`);
 
-  let result = await lightsail.getInstanceSnapshots().promise();
-  let snapshots = result.instanceSnapshots;
-
-  // Get all pages, if applicable.
-  while (result.nextPageToken) {
-    page++;
+  let snapshots: AWS.Lightsail.InstanceSnapshot[] = [];
+  let pageToken;
+  do {
     console.log(`Loading all snapshots (page ${page})`);
-    result = await lightsail
-      .getInstanceSnapshots({ pageToken: result.nextPageToken })
-      .promise();
-    snapshots = snapshots.concat(result.instanceSnapshots);
-  }
+    const {
+      instanceSnapshots,
+      nextPageToken
+    } = await lightsail.getInstanceSnapshots({ pageToken }).promise();
+    pageToken = nextPageToken;
+    snapshots = snapshots.concat(instanceSnapshots);
+    page++;
+  } while (pageToken);
 
   for (let snapshot of snapshots) {
     // Ignore snapshots not created via this script.
@@ -107,7 +106,7 @@ function isBackupSnapshot(snapshot) {
   return snapshot.name.endsWith("-autosnap");
 }
 
-function getLatestBackup(instance) {
+function getLatestBackup(instance: string) {
   let instanceBackups = backups[instance];
   if (!instanceBackups || instanceBackups.length === 0) {
     return null;
@@ -116,7 +115,7 @@ function getLatestBackup(instance) {
   return instanceBackups[instanceBackups.length - 1];
 }
 
-function hasBackupToday(instance) {
+function hasBackupToday(instance: string) {
   console.log(`${instance}: Checking for today's backup`);
 
   let latest = getLatestBackup(instance);
@@ -125,11 +124,11 @@ function hasBackupToday(instance) {
   return latest.createdAt.toDateString() === NOW_DATE_STRING;
 }
 
-function createBackup(instance) {
+function createBackup(instance: string) {
   console.log(`${instance}: Creating backup`);
 
   let name = `${instance}-${NOW.getTime()}-autosnap`;
-  let params = {
+  let params: AWS.Lightsail.CreateInstanceSnapshotRequest = {
     instanceName: instance,
     instanceSnapshotName: name
   };
@@ -143,13 +142,11 @@ function createBackup(instance) {
     });
 }
 
-function pruneBackups(instance) {
+async function pruneBackups(instance: string) {
   console.log(`${instance}: Pruning backups`);
 
   let instanceBackups = backups[instance];
   if (!instanceBackups) return;
-
-  const deletePromises: Promise<any>[] = [];
 
   for (let backup of instanceBackups) {
     let date = backup.createdAt;
@@ -186,14 +183,13 @@ function pruneBackups(instance) {
 
     if (!saveBackup) {
       console.log(`${instance}: Deleting backup from ${backup.createdAt}`);
-      deletePromises.push(deleteSnapshot(backup));
+      await deleteSnapshot(backup);
     }
   }
-  return deletePromises;
 }
 
-function deleteSnapshot(snapshot) {
-  let params = {
+function deleteSnapshot(snapshot: AWS.Lightsail.InstanceSnapshot) {
+  let params: AWS.Lightsail.DeleteInstanceSnapshotRequest = {
     instanceSnapshotName: snapshot.name
   };
 
